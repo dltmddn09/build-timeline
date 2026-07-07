@@ -28,7 +28,20 @@ function addDays(s, n) {
 }
 function dayDiff(a, b) { return Math.round((pd(b) - pd(a)) / 86400000); }
 function md(s) { const d = pd(s); return `${d.getMonth() + 1}/${d.getDate()}`; }
+function snapMonday(s) { let d = s; while (pd(d).getDay() !== 1) d = addDays(d, -1); return d; }
 const WEEKDAY_KR = ["일", "월", "화", "수", "목", "금", "토"];
+
+/* ── 버전 유틸 ── */
+function bumpMinor(v, inc) { // "1.12.00" → "1.14.00"
+  const m = v.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return "";
+  return `${m[1]}.${String(Number(m[2]) + (inc || 2)).padStart(2, "0")}.00`;
+}
+function bumpHotfix(v) { // "1.10.00" → "1.10.01"
+  const m = v.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return "";
+  return `${m[1]}.${m[2]}.${String(Number(m[3]) + 1).padStart(2, "0")}`;
+}
 
 /* ── 규칙 엔진: 이벤트 → 레인별 버전 구간 ── */
 function sortPatches(patches) {
@@ -40,7 +53,7 @@ function sortPatches(patches) {
 function deriveSegments(data) {
   const warnings = [];
   const laneIds = data.lanes.map(l => l.id);
-  const transitions = {}; // laneId → [{date, ver, why}]
+  const transitions = {}; // laneId → [{date, ver}]
   laneIds.forEach(id => transitions[id] = []);
 
   for (const b of data.branches) {
@@ -48,9 +61,9 @@ function deriveSegments(data) {
       warnings.push(`브랜치 ${b.date}: 알 수 없는 레인 (${b.from}→${b.to})`);
       continue;
     }
-    transitions[b.to].push({ date: b.date, ver: b.version, why: "브랜치 수신" });
+    transitions[b.to].push({ date: b.date, ver: b.version });
     if (b.sourceNext) {
-      transitions[b.from].push({ date: addDays(b.date, 1), ver: b.sourceNext, why: "브랜치 송신 다음 날" });
+      transitions[b.from].push({ date: addDays(b.date, 1), ver: b.sourceNext });
     }
   }
 
@@ -59,12 +72,15 @@ function deriveSegments(data) {
     const ps = sortPatches(data.patches);
     ps.forEach((p, i) => {
       if (p.type === "hotfix") {
-        transitions[pl].push({ date: p.date, ver: p.version, why: "핫픽스 당일" });
+        transitions[pl].push({ date: p.date, ver: p.version });
       } else if (p.mode === "solo") {
+        if (data.branches.some(b => b.to === pl && b.version === p.version)) {
+          warnings.push(`${p.version}(${p.date}): 단독 주차로 표시됐지만 같은 버전의 브랜치 이벤트도 있음 — 주차 방식 확인 필요`);
+        }
         if (i === 0) {
           warnings.push(`단독 주차 패치 ${p.version}(${p.date}): 직전 패치가 없어 시작일을 정할 수 없음`);
         } else {
-          transitions[pl].push({ date: addDays(ps[i - 1].date, 1), ver: p.version, why: "단독 주차(직전 패치 다음 날)" });
+          transitions[pl].push({ date: addDays(ps[i - 1].date, 1), ver: p.version });
         }
       }
       // regular 패치는 색 전환을 만들지 않음 — 브랜치 이벤트가 담당
@@ -124,6 +140,7 @@ function versionsInUse(data, segments) {
   Object.values(segments).forEach(segs => segs.forEach(s => set.add(s.ver)));
   data.branches.forEach(b => { set.add(b.version); if (b.sourceNext) set.add(b.sourceNext); });
   data.patches.forEach(p => set.add(p.version));
+  set.delete(""); set.delete(null); set.delete(undefined);
   return [...set].sort();
 }
 function resolveColors(data, versions) {
@@ -153,25 +170,42 @@ function resolveColors(data, versions) {
 
 /* ═══════════════ 이하 브라우저 전용 ═══════════════ */
 if (typeof module !== "undefined") {
-  module.exports = { deriveSegments, resolveColors, versionsInUse, addDays, sortPatches };
+  module.exports = { deriveSegments, resolveColors, versionsInUse, addDays, sortPatches, bumpMinor, bumpHotfix };
 }
 if (typeof document !== "undefined") (function () {
 
   const LS_KEY = "build-timeline-draft-v1";
   let data = deepCopy(window.TIMELINE_DATA);
   let dirty = false;
+  let lastSegments = null;
+  let lastColors = null;
+  let firstScroll = true;
 
   function deepCopy(o) { return JSON.parse(JSON.stringify(o)); }
+  function tint(hex) { return hex ? hex + "40" : "#B0BEC540"; } // 25% 투명 배경
+  function laneVersionAt(laneId, date) {
+    const segs = (lastSegments || {})[laneId] || [];
+    const seg = segs.find(s => s.start <= date && date <= s.end);
+    return seg ? seg.ver : "";
+  }
 
   /* ── 렌더링 ── */
   function render() {
+    closePopover();
     const { segments, warnings } = deriveSegments(data);
     const versions = versionsInUse(data, segments);
     const colors = resolveColors(data, versions);
+    lastSegments = segments;
+    lastColors = colors;
     document.getElementById("title-bar").textContent = data.title;
     document.title = data.title;
     renderGrid(segments, colors);
     renderEditor(versions, colors, warnings);
+    if (firstScroll) {
+      firstScroll = false;
+      const wrap = document.getElementById("grid-wrap");
+      requestAnimationFrame(() => { wrap.scrollLeft = wrap.scrollWidth; });
+    }
   }
 
   function renderGrid(segments, colors) {
@@ -189,8 +223,7 @@ if (typeof document !== "undefined") (function () {
     let weekToggle = true;
     const trW = document.createElement("tr"); trW.className = "hdr-row";
     const trD = document.createElement("tr"); trD.className = "hdr-row hdr-row2";
-    const cornerW = th("", "corner hdr"); cornerW.rowSpan = 1;
-    trW.appendChild(cornerW);
+    trW.appendChild(th("", "corner hdr"));
     trD.appendChild(th("BRANCH / DATE", "corner hdr"));
     for (const d of days) {
       const dt = pd(d), wd = dt.getDay();
@@ -223,8 +256,7 @@ if (typeof document !== "undefined") (function () {
           tr.appendChild(td);
           d = addDays(end, 1);
         } else {
-          const td = cell("", "empty");
-          tr.appendChild(td);
+          tr.appendChild(cell("", "empty"));
           d = addDays(d, 1);
         }
       }
@@ -241,10 +273,16 @@ if (typeof document !== "undefined") (function () {
           if (ev) {
             const td = cell(ev.time || "", "bridge-ev");
             td.style.background = colors[ev.version];
-            td.dataset.tip = `브랜치 ${lane.name} → ${next.name}\n${ev.version} · ${md(ev.date)} ${ev.time || ""}`;
+            td.dataset.tip = `브랜치 ${lane.name} → ${next.name}\n${ev.version} · ${md(ev.date)} ${ev.time || ""}\n(편집 모드에서 클릭하여 수정)`;
+            td.dataset.branchIdx = data.branches.indexOf(ev);
             trB.appendChild(td);
           } else {
-            trB.appendChild(cell("", "empty bridge-empty"));
+            const td = cell("", "empty bridge-empty");
+            td.dataset.bridgeNew = "";
+            td.dataset.date = day;
+            td.dataset.upper = lane.id;
+            td.dataset.lower = next.id;
+            trB.appendChild(td);
           }
         }
         tbl.appendChild(trB);
@@ -260,10 +298,14 @@ if (typeof document !== "undefined") (function () {
         if (p) {
           const label = p.label || `${p.version} ${p.type === "hotfix" ? "핫픽스" : "패치"}`;
           const td = cell(label, "patch-ev");
-          td.dataset.tip = `${label}\n${md(day)}(${WEEKDAY_KR[pd(day).getDay()]})${p.type !== "hotfix" ? " · " + (p.mode === "solo" ? "ALPHA 단독 주차" : "정규 브랜치 주차") : ""}`;
+          td.dataset.tip = `${label}\n${md(day)}(${WEEKDAY_KR[pd(day).getDay()]})${p.type !== "hotfix" ? " · " + (p.mode === "solo" ? "ALPHA 단독 주차" : "정규 브랜치 주차") : ""}\n(편집 모드에서 클릭하여 수정)`;
+          td.dataset.patchIdx = data.patches.indexOf(p);
           tr.appendChild(td);
         } else {
-          tr.appendChild(cell("", "empty patch-empty"));
+          const td = cell("", "empty patch-empty");
+          td.dataset.patchNew = "";
+          td.dataset.date = day;
+          tr.appendChild(td);
         }
       }
       tbl.appendChild(tr);
@@ -292,28 +334,233 @@ if (typeof document !== "undefined") (function () {
     tip.style.left = x + "px"; tip.style.top = y + "px";
   });
 
-  /* ── 편집기 ── */
+  /* ── 팝오버 ── */
+  const pop = document.getElementById("popover");
+  function closePopover() { pop.hidden = true; pop.innerHTML = ""; }
+  function openPopover(anchor, build) {
+    pop.innerHTML = "";
+    build(pop);
+    pop.hidden = false;
+    const r = anchor.getBoundingClientRect();
+    let x = Math.min(r.left, window.innerWidth - pop.offsetWidth - 10);
+    let y = r.bottom + 6;
+    if (y + pop.offsetHeight > window.innerHeight - 10) y = Math.max(10, r.top - pop.offsetHeight - 6);
+    pop.style.left = Math.max(10, x) + "px";
+    pop.style.top = y + "px";
+  }
+  document.addEventListener("click", e => {
+    if (pop.hidden) return;
+    if (pop.contains(e.target)) return;
+    if (e.target.closest("td[data-bridge-new],td[data-branch-idx],td[data-patch-idx]")) return;
+    closePopover();
+  });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closePopover(); });
+
+  function pField(label, input) {
+    const r = document.createElement("div"); r.className = "ed-field";
+    const l = document.createElement("label"); l.textContent = label;
+    r.append(l, input);
+    return r;
+  }
+  function pIn(type, value, placeholder) {
+    const i = document.createElement("input");
+    i.type = type; i.value = value || "";
+    if (placeholder) i.placeholder = placeholder;
+    return i;
+  }
+  function pSel(pairs, value) {
+    const s = document.createElement("select");
+    for (const [v, label] of pairs) {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = label; if (v === value) o.selected = true;
+      s.appendChild(o);
+    }
+    return s;
+  }
+  function pTitle(text) { const h = document.createElement("h4"); h.textContent = text; return h; }
+  function laneName(id) { const l = data.lanes.find(l => l.id === id); return l ? l.name : id; }
+
+  /* 브랜치 생성 팝오버 (레인 사이 빈 칸 클릭) */
+  function popBridgeNew(td) {
+    const date = td.dataset.date, upper = td.dataset.upper, lower = td.dataset.lower;
+    const upperVer = laneVersionAt(upper, date);
+    const isTopLane = data.lanes[0] && data.lanes[0].id === upper;
+    openPopover(td, box => {
+      box.appendChild(pTitle(`브랜치 · ${md(date)}(${WEEKDAY_KR[pd(date).getDay()]}) · ${laneName(upper)} → ${laneName(lower)}`));
+      const time = pIn("time", "22:00");
+      const ver = pIn("text", upperVer, "버전");
+      const next = pIn("text", isTopLane && upperVer ? bumpMinor(upperVer) : "", "비우면 버전 유지");
+      box.appendChild(pField("시간", time));
+      box.appendChild(pField("버전", ver));
+      box.appendChild(pField(`${laneName(upper)} 다음 버전`, next));
+      const row = document.createElement("div"); row.className = "pop-actions";
+      const ok = document.createElement("button"); ok.className = "ed-btn primary"; ok.textContent = "브랜치 생성";
+      ok.addEventListener("click", () => {
+        if (!ver.value.trim()) { alert("버전을 입력하세요."); return; }
+        const ev = { date, time: time.value, from: upper, to: lower, version: ver.value.trim() };
+        if (next.value.trim()) ev.sourceNext = next.value.trim();
+        data.branches.push(ev);
+        // 이 브랜치가 패치 레인으로 들어가면, 같은 버전의 단독 주차 패치는 정규로 자동 전환
+        if (lower === data.patchLaneId) {
+          data.patches.forEach(p => { if (p.version === ev.version && p.mode === "solo") p.mode = "regular"; });
+        }
+        touch();
+      });
+      const cancel = document.createElement("button"); cancel.className = "ed-btn"; cancel.textContent = "취소";
+      cancel.addEventListener("click", closePopover);
+      row.append(ok, cancel);
+      box.appendChild(row);
+    });
+  }
+
+  /* 브랜치 수정/삭제 팝오버 */
+  function popBridgeEdit(td) {
+    const idx = Number(td.dataset.branchIdx);
+    const b = data.branches[idx];
+    if (!b) return;
+    openPopover(td, box => {
+      box.appendChild(pTitle(`브랜치 · ${md(b.date)}(${WEEKDAY_KR[pd(b.date).getDay()]}) · ${laneName(b.from)} → ${laneName(b.to)}`));
+      const date = pIn("date", b.date);
+      const time = pIn("time", b.time || "");
+      const ver = pIn("text", b.version, "버전");
+      const next = pIn("text", b.sourceNext || "", "비우면 버전 유지");
+      box.appendChild(pField("날짜", date));
+      box.appendChild(pField("시간", time));
+      box.appendChild(pField("버전", ver));
+      box.appendChild(pField(`${laneName(b.from)} 다음 버전`, next));
+      const row = document.createElement("div"); row.className = "pop-actions";
+      const ok = document.createElement("button"); ok.className = "ed-btn primary"; ok.textContent = "저장";
+      ok.addEventListener("click", () => {
+        if (date.value) b.date = date.value;
+        b.time = time.value;
+        b.version = ver.value.trim();
+        if (next.value.trim()) b.sourceNext = next.value.trim(); else delete b.sourceNext;
+        touch();
+      });
+      const del = document.createElement("button"); del.className = "ed-btn danger"; del.textContent = "삭제";
+      del.addEventListener("click", () => { data.branches.splice(idx, 1); touch(); });
+      row.append(ok, del);
+      box.appendChild(row);
+    });
+  }
+
+  /* 패치 수정/삭제 팝오버 */
+  function popPatchEdit(td) {
+    const idx = Number(td.dataset.patchIdx);
+    const p = data.patches[idx];
+    if (!p) return;
+    openPopover(td, box => {
+      box.appendChild(pTitle(`${p.type === "hotfix" ? "핫픽스" : "패치"} · ${md(p.date)}(${WEEKDAY_KR[pd(p.date).getDay()]})`));
+      const date = pIn("date", p.date);
+      const ver = pIn("text", p.version, "버전");
+      const type = pSel([["patch", "패치"], ["hotfix", "핫픽스"]], p.type);
+      const mode = pSel([["regular", "정규 브랜치 주차"], ["solo", "단독 주차"]], p.mode || "regular");
+      mode.disabled = p.type === "hotfix";
+      type.addEventListener("change", () => { mode.disabled = type.value === "hotfix"; });
+      const label = pIn("text", p.label || "", "비우면 자동 (버전 패치)");
+      box.appendChild(pField("날짜", date));
+      box.appendChild(pField("버전", ver));
+      box.appendChild(pField("종류", type));
+      box.appendChild(pField("주차 방식", mode));
+      box.appendChild(pField("표시 텍스트", label));
+      const row = document.createElement("div"); row.className = "pop-actions";
+      const ok = document.createElement("button"); ok.className = "ed-btn primary"; ok.textContent = "저장";
+      ok.addEventListener("click", () => {
+        if (date.value) p.date = date.value;
+        p.version = ver.value.trim();
+        p.type = type.value;
+        if (p.type === "hotfix") delete p.mode; else p.mode = mode.value;
+        if (label.value.trim()) p.label = label.value.trim(); else delete p.label;
+        touch();
+      });
+      const del = document.createElement("button"); del.className = "ed-btn danger"; del.textContent = "삭제";
+      del.addEventListener("click", () => { data.patches.splice(idx, 1); touch(); });
+      row.append(ok, del);
+      box.appendChild(row);
+    });
+  }
+
+  /* 패치 빈 칸 클릭 → 인라인 입력. "패치"/"핫픽스" 단어로 종류를, 숫자로 버전을 자동 인식 */
+  function inlinePatchInput(td) {
+    const date = td.dataset.date;
+    td.textContent = "";
+    const inp = document.createElement("input");
+    inp.className = "cell-input";
+    inp.placeholder = "패치 / 핫픽스";
+    td.appendChild(inp);
+    inp.focus();
+    let done = false;
+    const commit = () => {
+      if (done) return; done = true;
+      const text = inp.value.trim();
+      if (!text) { render(); return; }
+      const type = /핫픽스|hotfix/i.test(text) ? "hotfix" : "patch";
+      let ver = (text.match(/\d+\.\d+\.\d+/) || [])[0] || "";
+      if (!ver) {
+        const laneVer = laneVersionAt(data.patchLaneId, date);
+        ver = type === "hotfix" ? (bumpHotfix(laneVer) || laneVer) : laneVer;
+      }
+      if (!ver) { alert("버전을 인식할 수 없습니다. 예: 1.12.00 패치"); render(); return; }
+      const ev = { date, version: ver, type };
+      if (type === "patch") {
+        ev.mode = data.branches.some(b => b.to === data.patchLaneId && b.version === ver) ? "regular" : "solo";
+      }
+      const auto = `${ver} ${type === "hotfix" ? "핫픽스" : "패치"}`;
+      if (text !== auto && !/^(패치|핫픽스)$/.test(text) && !/^\d+\.\d+\.\d+$/.test(text)) ev.label = text;
+      data.patches.push(ev);
+      touch();
+    };
+    inp.addEventListener("keydown", e => {
+      if (e.key === "Enter") commit();
+      if (e.key === "Escape") { done = true; render(); }
+    });
+    inp.addEventListener("blur", commit);
+  }
+
+  /* 캘린더 직접 편집 — 편집 모드에서만 동작 */
+  document.getElementById("grid-wrap").addEventListener("click", e => {
+    if (!document.body.classList.contains("editing")) return;
+    const td = e.target.closest("td");
+    if (!td) return;
+    if (td.querySelector("input")) return; // 인라인 입력 중
+    if (td.dataset.bridgeNew !== undefined) popBridgeNew(td);
+    else if (td.dataset.branchIdx !== undefined) popBridgeEdit(td);
+    else if (td.dataset.patchNew !== undefined) { closePopover(); inlinePatchInput(td); }
+    else if (td.dataset.patchIdx !== undefined) popPatchEdit(td);
+  });
+
+  /* ── 편집 패널 ── */
   function renderEditor(versions, colors, warnings) {
     const el = document.getElementById("editor-body");
     el.innerHTML = "";
 
-    // 경고
+    el.appendChild(div("ed-hint ed-hint-top",
+      "캘린더에서 바로 편집할 수 있습니다 — 레인 사이 빈 칸 클릭 = 브랜치 생성, " +
+      "패치 행 빈 칸 클릭 = 패치 입력(“패치”/“핫픽스”라고만 쳐도 버전 자동 인식), " +
+      "기존 셀 클릭 = 수정/삭제."));
+
     if (warnings.length) {
       const w = div("ed-warn");
       w.innerHTML = "<b>⚠ 확인 필요</b><br>" + warnings.map(esc).join("<br>");
       el.appendChild(w);
     }
 
-    // 기본 설정
+    // 기본 설정 + 기간 프리셋
+    const presets = div("ed-item");
+    [["최근 4주", 4], ["최근 8주", 8], ["전체", 0]].forEach(([label, weeks]) => {
+      presets.appendChild(btn(label, () => applyPreset(weeks)));
+    });
     el.appendChild(section("기본 설정", [
       fieldRow("타이틀", inputEl("text", data.title, v => { data.title = v; })),
       fieldRow("시작일", inputEl("date", data.startDate, v => { if (v) data.startDate = v; })),
       fieldRow("종료일", inputEl("date", data.endDate, v => { if (v) data.endDate = v; })),
+      fieldRow("표시 기간", presets),
     ]));
 
     // 레인
     const laneRows = data.lanes.map((lane, i) => {
       const row = div("ed-item");
+      stripe(row, lane.labelBg || "#455A64");
       row.append(
         inputEl("text", lane.name, v => { lane.name = v; }, "레인 이름", "w-name"),
         colorEl(lane.labelBg || "#455A64", v => { lane.labelBg = v; }),
@@ -332,32 +579,35 @@ if (typeof document !== "undefined") (function () {
       );
       return row;
     });
-    const patchLaneSel = selectEl(data.lanes.map(l => [l.id, l.name]), data.patchLaneId, v => { data.patchLaneId = v; });
-    laneRows.push(fieldRow("패치 발생 레인", patchLaneSel));
+    laneRows.push(fieldRow("패치 발생 레인",
+      selectEl(data.lanes.map(l => [l.id, l.name]), data.patchLaneId, v => { data.patchLaneId = v; })));
     laneRows.push(btn("+ 레인 추가", () => {
       const id = "lane" + Date.now().toString(36);
       data.lanes.push({ id, name: "NEW LANE", labelBg: "#455A64" }); touch();
     }, "add"));
     el.appendChild(section("레인 (위→아래 순서)", laneRows));
 
-    // 브랜치 이벤트
-    const brRows = [...data.branches]
-      .sort((a, b) => a.date < b.date ? -1 : 1)
-      .map(b => {
-        const row = div("ed-item ed-grid");
-        row.append(
-          inputEl("date", b.date, v => { if (v) b.date = v; }),
-          inputEl("time", b.time || "", v => { b.time = v; }),
-          selectEl(data.lanes.map(l => [l.id, l.name]), b.from, v => { b.from = v; }),
-          span("→"),
-          selectEl(data.lanes.map(l => [l.id, l.name]), b.to, v => { b.to = v; }),
-          inputEl("text", b.version, v => { b.version = v; }, "버전", "w-ver"),
-          inputEl("text", b.sourceNext || "", v => { if (v) b.sourceNext = v; else delete b.sourceNext; }, "보낸 레인 다음 버전", "w-ver"),
-          btn("✕", () => { data.branches.splice(data.branches.indexOf(b), 1); touch(); }, "danger"),
-        );
-        return row;
-      });
-    brRows.push(div("ed-hint", "‘보낸 레인 다음 버전’: 브랜치를 내보낸 레인이 다음 날부터 무슨 버전이 되는지 (예: MAINLINE→BETA로 1.12.00을 보내면 MAINLINE은 1.14.00). 비워두면 보낸 레인은 색이 바뀌지 않습니다."));
+    // 브랜치 이벤트 — 최신순, 표시 기간 이전은 접기
+    const brSorted = [...data.branches].sort((a, b) => a.date < b.date ? 1 : -1);
+    const brRow = b => {
+      const row = div("ed-item ed-grid");
+      stripe(row, colors[b.version]);
+      row.append(
+        inputEl("date", b.date, v => { if (v) b.date = v; }),
+        inputEl("time", b.time || "", v => { b.time = v; }),
+        selectEl(data.lanes.map(l => [l.id, l.name]), b.from, v => { b.from = v; }),
+        span("→"),
+        selectEl(data.lanes.map(l => [l.id, l.name]), b.to, v => { b.to = v; }),
+        inputEl("text", b.version, v => { b.version = v; }, "버전", "w-ver"),
+        inputEl("text", b.sourceNext || "", v => { if (v) b.sourceNext = v; else delete b.sourceNext; }, "보낸 레인 다음 버전", "w-ver"),
+        btn("✕", () => { data.branches.splice(data.branches.indexOf(b), 1); touch(); }, "danger"),
+      );
+      return row;
+    };
+    const brCur = brSorted.filter(b => b.date >= data.startDate);
+    const brPast = brSorted.filter(b => b.date < data.startDate);
+    const brRows = brCur.map(brRow);
+    if (brPast.length) brRows.push(foldPast(`지난 브랜치 ${brPast.length}건`, brPast.map(brRow)));
     brRows.push(btn("+ 브랜치 추가", () => {
       const last = data.branches[data.branches.length - 1];
       data.branches.push({
@@ -367,9 +617,11 @@ if (typeof document !== "undefined") (function () {
     }, "add"));
     el.appendChild(section("브랜치 이벤트", brRows));
 
-    // 패치 이벤트
-    const paRows = sortPatches(data.patches).map(p => {
+    // 패치 이벤트 — 최신순, 표시 기간 이전은 접기
+    const paSorted = sortPatches(data.patches).reverse();
+    const paRow = p => {
       const row = div("ed-item ed-grid");
+      stripe(row, colors[p.version]);
       row.append(
         inputEl("date", p.date, v => { if (v) p.date = v; }),
         inputEl("text", p.version, v => { p.version = v; }, "버전", "w-ver"),
@@ -382,7 +634,11 @@ if (typeof document !== "undefined") (function () {
         btn("✕", () => { data.patches.splice(data.patches.indexOf(p), 1); touch(); }, "danger"),
       );
       return row;
-    });
+    };
+    const paCur = paSorted.filter(p => p.date >= data.startDate);
+    const paPast = paSorted.filter(p => p.date < data.startDate);
+    const paRows = paCur.map(paRow);
+    if (paPast.length) paRows.push(foldPast(`지난 패치 ${paPast.length}건`, paPast.map(paRow)));
     paRows.push(div("ed-hint", "단독 주차 패치는 직전 패치 다음 날부터 패치 레인 색이 전환됩니다. 정규 주차 버전은 브랜치 이벤트를 입력해야만 색이 칠해집니다(미리 칠하지 않음)."));
     paRows.push(btn("+ 패치 추가", () => {
       const last = sortPatches(data.patches).pop();
@@ -394,6 +650,7 @@ if (typeof document !== "undefined") (function () {
     // 버전 색상
     const vcRows = versions.map(v => {
       const row = div("ed-item");
+      stripe(row, colors[v]);
       row.append(
         span(v, "w-ver ver-name"),
         colorEl(colors[v], val => {
@@ -434,10 +691,34 @@ if (typeof document !== "undefined") (function () {
     ]));
   }
 
+  function applyPreset(weeks) {
+    const dates = [...data.branches.map(b => b.date), ...data.patches.map(p => p.date)];
+    if (!dates.length) return;
+    const maxD = dates.reduce((a, b) => a > b ? a : b);
+    const minD = dates.reduce((a, b) => a < b ? a : b);
+    data.endDate = maxD;
+    data.startDate = snapMonday(weeks ? addDays(maxD, -(weeks * 7 - 1)) : minD);
+    if (data.startDate < minD && weeks) data.startDate = snapMonday(minD);
+    touch();
+  }
+
   /* ── 편집기 DOM 헬퍼 ── */
   function div(cls, text) { const e = document.createElement("div"); e.className = cls; if (text) e.textContent = text; return e; }
   function span(text, cls) { const e = document.createElement("span"); e.textContent = text; if (cls) e.className = cls; return e; }
   function esc(s) { const e = document.createElement("span"); e.textContent = s; return e.innerHTML; }
+  function stripe(row, color) {
+    row.style.borderLeft = `4px solid ${color || "#B0BEC5"}`;
+    row.style.background = tint(color);
+  }
+  function foldPast(label, rows) {
+    const d = document.createElement("details");
+    d.className = "past-events";
+    const s = document.createElement("summary");
+    s.textContent = label + " (표시 기간 이전)";
+    d.appendChild(s);
+    rows.forEach(r => d.appendChild(r));
+    return d;
+  }
   function section(titleText, children) {
     const s = div("ed-section");
     const h = document.createElement("h3"); h.textContent = titleText;
@@ -552,6 +833,17 @@ if (typeof document !== "undefined") (function () {
       lines.push(`${lane}: ${ok ? "PASS" : "FAIL"}`);
       if (!ok) lines.push(`  expected ${JSON.stringify(expected[lane])}\n  got      ${JSON.stringify(got)}`);
     }
+    const unit = [
+      ["bumpMinor", bumpMinor("1.12.00"), "1.14.00"],
+      ["bumpHotfix", bumpHotfix("1.10.00"), "1.10.01"],
+      ["bumpHotfix2", bumpHotfix("1.10.01"), "1.10.02"],
+      ["snapMonday", snapMonday("2026-06-14"), "2026-06-08"],
+    ];
+    for (const [name, got, want] of unit) {
+      const ok = got === want;
+      if (!ok) pass = false;
+      lines.push(`${name}: ${ok ? "PASS" : `FAIL (got ${got}, want ${want})`}`);
+    }
     lines.push("warnings: " + JSON.stringify(warnings));
     lines.push(pass ? "SELFTEST: ALL PASS" : "SELFTEST: FAIL");
     const pre = document.createElement("pre");
@@ -559,5 +851,16 @@ if (typeof document !== "undefined") (function () {
     document.body.prepend(pre);
   }
 
+  /* ── 데모 훅 (스크린샷/수동 확인용): ?demo=bridge / ?demo=patch ── */
   render();
+  if (location.search.includes("demo=bridge")) {
+    document.body.classList.add("editing");
+    const td = document.querySelector("td[data-bridge-new]");
+    if (td) popBridgeNew(td);
+  }
+  if (location.search.includes("demo=patch")) {
+    document.body.classList.add("editing");
+    const td = document.querySelector("td[data-patch-new]");
+    if (td) inlinePatchInput(td);
+  }
 })();

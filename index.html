@@ -97,6 +97,33 @@
     white-space: pre-line; max-width: 280px; line-height: 1.45;
   }
 
+  /* 캘린더 직접 편집 (편집 모드에서만) */
+  body.editing td[data-bridge-new], body.editing td[data-patch-new],
+  body.editing td[data-branch-idx], body.editing td[data-patch-idx],
+  body.editing td.seg { cursor: pointer; }
+  body.editing td[data-bridge-new]:hover, body.editing td[data-patch-new]:hover {
+    outline: 2px dashed #7A93AC; outline-offset: -2px; background: #EDF3F9;
+  }
+  .cell-input {
+    width: 100%; min-width: 90px; box-sizing: border-box;
+    font-size: 11px; padding: 2px 3px; border: 1px solid #35506B; border-radius: 2px;
+  }
+
+  /* 팝오버 */
+  #popover {
+    position: fixed; z-index: 60; background: #fff;
+    border: 1px solid #C3CBD4; border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(20, 30, 40, .22);
+    padding: 12px 14px; min-width: 250px; font-size: 12px;
+  }
+  #popover[hidden] { display: none; }
+  #popover h4 { margin: 0 0 10px; font-size: 12px; color: #35506B; }
+  #popover .ed-field input, #popover .ed-field select {
+    padding: 4px 6px; border: 1px solid #C8CED6; border-radius: 4px; font-size: 12px; flex: 1;
+  }
+  #popover .ed-field label { width: 110px; }
+  .pop-actions { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; }
+
   /* 편집 패널 */
   #editor h2 { margin: 4px 0 12px; font-size: 16px; }
   .ed-section {
@@ -131,6 +158,16 @@
   .ed-btn.primary { background: #1F4E79; color: #fff; border-color: #1F4E79; font-weight: 700; }
   .ed-btn.primary:hover { background: #2A628F; }
   .ed-hint { font-size: 11px; color: #778; line-height: 1.5; margin: 6px 0; }
+  .ed-hint-top {
+    background: #EDF3F9; border: 1px solid #CDDBE8; border-radius: 6px;
+    padding: 8px 10px; margin-bottom: 12px; color: #35506B;
+  }
+  .ed-item { border-radius: 4px; padding: 4px 6px; }
+  details.past-events { margin: 6px 0; }
+  details.past-events summary {
+    cursor: pointer; font-size: 12px; color: #567; padding: 4px 0;
+  }
+  details.past-events summary:hover { color: #1F4E79; }
   .ed-warn {
     background: #FDECEA; border: 1px solid #F2B8B5; color: #8C1D18;
     border-radius: 6px; padding: 8px 10px; font-size: 12px; margin-bottom: 12px; line-height: 1.5;
@@ -155,6 +192,7 @@
     </aside>
   </div>
   <div id="tooltip" hidden></div>
+  <div id="popover" hidden></div>
   <script src="data.js"></script>
   <script src="app.js"></script>
 </body>
