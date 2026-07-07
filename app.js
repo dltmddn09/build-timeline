@@ -152,14 +152,22 @@ function resolveColors(data, versions) {
     const c = FALLBACK_BGS[fi % FALLBACK_BGS.length]; fi++;
     return c;
   };
-  for (const v of versions) {
+  for (const v of versions) { // 오름차순이므로 핫픽스의 직전 빌드가 먼저 결정됨
     if (colors[v]) continue;
     const m = v.match(/^(\d+\.\d+)\.(\d+)$/);
-    const baseVer = m && m[2] !== "00" ? `${m[1]}.00` : null;
-    if (baseVer && colors[baseVer]) {
-      // 핫픽스: 기본 버전과 유사하되 구분되는 색 (조금 진하게)
-      const [h, s, l] = hexToHsl(colors[baseVer]);
-      colors[v] = hslToHex(h, Math.min(1, s + 0.08), Math.max(0, l - 0.08));
+    const cc = m ? Number(m[2]) : 0;
+    let prev = null;
+    if (m && cc > 0) {
+      // 핫픽스: 가장 가까운 직전 빌드(CC-1, CC-2, … , .00)의 색에서 한 단계 더 진하게.
+      // 매 핫픽스마다 색이 달라져야 함 (빌드가 다르므로)
+      for (let k = cc - 1; k >= 0; k--) {
+        const pv = `${m[1]}.${String(k).padStart(2, "0")}`;
+        if (colors[pv]) { prev = colors[pv]; break; }
+      }
+    }
+    if (prev) {
+      const [h, s, l] = hexToHsl(prev);
+      colors[v] = hslToHex(h, Math.min(1, s + 0.08), Math.max(0.15, l - 0.08));
     } else {
       colors[v] = nextFallback();
     }
@@ -833,11 +841,15 @@ if (typeof document !== "undefined") (function () {
       lines.push(`${lane}: ${ok ? "PASS" : "FAIL"}`);
       if (!ok) lines.push(`  expected ${JSON.stringify(expected[lane])}\n  got      ${JSON.stringify(got)}`);
     }
+    const hfColors = resolveColors(
+      { versionColors: { "1.12.00": "#EDE7F6" } },
+      ["1.12.00", "1.12.01", "1.12.02"]);
     const unit = [
       ["bumpMinor", bumpMinor("1.12.00"), "1.14.00"],
       ["bumpHotfix", bumpHotfix("1.10.00"), "1.10.01"],
       ["bumpHotfix2", bumpHotfix("1.10.01"), "1.10.02"],
       ["snapMonday", snapMonday("2026-06-14"), "2026-06-08"],
+      ["hotfixColorsDistinct", String(hfColors["1.12.01"] !== hfColors["1.12.02"] && hfColors["1.12.01"] !== hfColors["1.12.00"]), "true"],
     ];
     for (const [name, got, want] of unit) {
       const ok = got === want;
